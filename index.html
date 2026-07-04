@@ -1246,6 +1246,11 @@ function onXlsxPicked(input){
 }
 
 function migrate(){
+  // ★未接続/未読込のまま移行すると、保存されずタブを閉じた時に全消失する事故になる。先に接続を必須化
+  if(FSA_SUPPORTED && (!fileHandle || !dataLoadedFromFile)){
+    document.getElementById('migMsg').innerHTML='<span style="color:#b91c1c;font-weight:700">先に台帳ファイルに接続してください。</span><br>上部の「再接続する」または「開く」で台帳を開いてから取り込みます（接続前に取り込むとデータが失われます）。';
+    return;
+  }
   if(!_migRows||!_migRows.length){document.getElementById('migMsg').textContent='先にExcelファイルを選択してください';return;}
   if(rows.length && !confirm('現在の '+rows.length+' 件を、Excelの '+_migRows.length+' 件で置き換えます。よろしいですか？\n（この操作の前のデータには、OneDrive/共有のファイル履歴から戻せます）')) return;
   const n=_migRows.length;
