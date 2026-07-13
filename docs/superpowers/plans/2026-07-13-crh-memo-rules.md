@@ -148,4 +148,3 @@ git commit -m "feat: show CRH memo rules"
 ```
 
 Expected: 実装2ファイルだけを含む新規コミットが作成される。
-
