@@ -144,3 +144,34 @@ test("設定画面 / SMS画面 への遷移と一覧への復帰が動く", asyn
   await expect(page.locator("#screenMain")).not.toHaveClass(/hidden/);
   await expect(page.locator("#screenSms")).toHaveClass(/hidden/);
 });
+
+test("予約詳細にCRH予約メモ記載ルールが表示される", async ({ page }) => {
+  await disableFSA(page);
+  await page.goto("/index.html");
+  await page.waitForLoadState("networkidle");
+
+  await page.evaluate((fixture) => {
+    window.applyJson(fixture);
+    window.setMode(true);
+  }, FIXTURE);
+
+  await page.locator("#list .gi").first().click();
+
+  const rules = page.getByRole("complementary", {
+    name: "CRH予約メモ記載ルール",
+  });
+  await expect(rules).toBeVisible();
+  await expect(rules.getByRole("listitem")).toHaveText([
+    "お礼メール送付完了 ⇒ □",
+    "電話コンタクト完了 ⇒ ■",
+    "組数確定 ⇒ ◎",
+    "M定例コンペ ⇒ 定例",
+  ]);
+  await expect(page.getByText("戻し方は2通り", { exact: false })).toHaveCount(0);
+
+  await rules.scrollIntoViewIfNeeded();
+  await page.screenshot({
+    path: "test-results/crh-memo-rules.png",
+    fullPage: true,
+  });
+});
