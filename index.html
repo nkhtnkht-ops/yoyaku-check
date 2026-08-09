@@ -90,6 +90,13 @@
   .memo-rule-title{font-weight:600;color:#333;margin-bottom:4px;}
   .memo-rule-note ol{margin:0;padding-left:1.8em;}
   .memo-rule-note li{padding-left:2px;}
+  .audit-history{margin-top:14px;padding:12px 14px;border:1px solid #cbd5e1;border-radius:6px;background:#f8fafc;color:#334155;font-size:12px;line-height:1.55;}
+  .audit-history-title{font-weight:650;color:#0f172a;margin-bottom:8px;}
+  .audit-history-list{display:flex;flex-direction:column;gap:8px;}
+  .audit-history-item{padding-top:8px;border-top:1px solid #e2e8f0;}
+  .audit-history-item:first-child{padding-top:0;border-top:0;}
+  .audit-history-meta{color:#64748b;font-family:var(--mono);font-size:11px;}
+  .audit-history-change{color:#0f172a;font-weight:550;overflow-wrap:anywhere;}
   .delbtn{border:1px solid #000;background:#fff;color:#000;border-radius:50px;font-size:12px;font-weight:450;padding:6px 14px;cursor:pointer;}
   .delbtn:hover{background:#000;color:#fff;}
   .grid{display:grid;grid-template-columns:1fr 1fr;gap:14px 24px;}
@@ -235,6 +242,7 @@
       </div>
     </div>
     <div class="msg" id="impMsg"></div>
+    <div id="importAudit"></div>
   </div>
 
   <div class="imp hidden" id="screenSettings">
@@ -369,6 +377,8 @@ let lastBackupTime=0;              // バックアップ書込のスロットル
 let fileHandle=null, fileName='', isDirty=false, saveTimer=null, isSaving=false;
 let suspendDirty=false;            // 読み込み中などはdirtyにしない
 let updatedBy = localStorage.getItem('compe.updatedBy') || '';
+let auditLog=[];                    // 操作履歴。既存JSONでは空から開始し、以後の変更を保存
+let auditSeq=0;
 let dataLoadedFromFile=false;       // trueなら起動時のサンプルではなくJSONが正本（＝この値がfalseの間は絶対に保存しない＝未読込での上書き事故防止）
 let lastKnownCount=-1;              // 直近で読込/保存した件数。激減保存の検知用
 let lastWrittenMtime=0;             // 自分が最後に書いた時のファイル更新時刻
@@ -430,6 +440,49 @@ async function ensurePermission(handle,mode){
   return await handle.requestPermission(opts);
 }
 
+function makeAuditId(prefix){
+  if(globalThis.crypto&&typeof globalThis.crypto.randomUUID==='function')return prefix+'-'+globalThis.crypto.randomUUID();
+  auditSeq++;
+  return prefix+'-'+Date.now().toString(36)+'-'+auditSeq.toString(36)+'-'+Math.random().toString(36).slice(2,8);
+}
+function ensureRowId(r){ if(r&&!r.rid)r.rid=makeAuditId('row'); return r?r.rid:''; }
+function nowJstIso(){ const d=new Date(Date.now()+9*60*60*1000); return d.toISOString().replace('Z','+09:00'); }
+function auditValue(v){ if(v==null||v==='')return ''; return typeof v==='string'?v:JSON.stringify(v); }
+function addAudit(r,action,before,after,source,detail){
+  const event={
+    id:makeAuditId('event'),at:nowJstIso(),by:updatedBy||'未設定',
+    rowId:r?ensureRowId(r):'',name:r?(r.n||''):'',play:r?(r.play||''):'',
+    action:action||'',before:auditValue(before),after:auditValue(after),
+    source:source||'画面操作',detail:detail||''
+  };
+  auditLog.push(event);
+  return event;
+}
+function fmtAuditAt(s){
+  const d=new Date(s); if(Number.isNaN(d.getTime()))return s||'';
+  return new Intl.DateTimeFormat('ja-JP',{timeZone:'Asia/Tokyo',year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false}).format(d);
+}
+function auditDisplayValue(v){ return v==null||v===''?'未':String(v); }
+function renderAuditHistory(r){
+  const rid=ensureRowId(r);
+  const events=auditLog.filter(e=>e&&e.rowId===rid).slice(-20).reverse();
+  const body=events.length?events.map(e=>{
+    const change=auditDisplayValue(e.before)+' → '+auditDisplayValue(e.after);
+    return `<div class="audit-history-item"><div class="audit-history-meta">${esc(fmtAuditAt(e.at))} ・ ${esc(e.by||'未設定')} ・ ${esc(e.source||'')}</div><div class="audit-history-change">${esc(e.action||'変更')}：${esc(change)}</div>${e.detail?`<div>${esc(e.detail)}</div>`:''}</div>`;
+  }).join(''):'<div style="color:#64748b">この予約の操作履歴はまだありません。</div>';
+  return `<section class="audit-history" role="region" aria-label="操作履歴"><div class="audit-history-title">操作履歴（最新20件）</div><div class="audit-history-list">${body}</div></section>`;
+}
+function renderImportAudit(){
+  const host=document.getElementById('importAudit'); if(!host)return;
+  const events=auditLog.filter(e=>e&&e.action==='CSV取込照合').slice(-10).reverse();
+  const body=events.length?events.map(e=>{
+    const related=e.importId?auditLog.filter(x=>x&&x.importId===e.importId&&x.action!=='CSV取込照合'):[];
+    const details=related.length?`<details style="margin-top:6px"><summary style="cursor:pointer">判定明細 ${related.length}件</summary>${related.map(x=>`<div style="margin-top:5px"><b>${esc(x.name||'氏名なし')}</b> ${esc(x.play||'日付なし')}：${esc(x.action||'判定')}（${esc(auditDisplayValue(x.after))}）${x.detail?`<br>${esc(x.detail)}`:''}</div>`).join('')}</details>`:'';
+    return `<div class="audit-history-item"><div class="audit-history-meta">${esc(fmtAuditAt(e.at))} ・ ${esc(e.by||'未設定')}</div><div class="audit-history-change">${esc(e.before||'')} → ${esc(e.after||'')}</div>${e.detail?`<div>${esc(e.detail)}</div>`:''}${details}</div>`;
+  }).join(''):'<div style="color:#64748b">CSV取込履歴はまだありません。</div>';
+  host.innerHTML=`<section class="audit-history" role="region" aria-label="CSV取込履歴"><div class="audit-history-title">CSV取込履歴（最新10回）</div><div class="audit-history-list">${body}</div></section>`;
+}
+
 function buildJson(){
   return {
     schemaVersion:SCHEMA_VERSION,
@@ -439,6 +492,7 @@ function buildJson(){
       tenpo: '泉佐野'
     },
     settings:{ o1,o2,o3,o4, excludeKakutei, todayTouch },
+    auditLog,
     rows: rows.map(r=>{
       // _touchは実行時フラグなので保存しない
       const {_touch, ...rest} = r;
@@ -451,6 +505,7 @@ function applyJson(data){
   if(!data || typeof data!=='object') throw new Error('JSONが不正です');
   if(data.schemaVersion && data.schemaVersion>SCHEMA_VERSION) throw new Error('未対応のschemaVersion: '+data.schemaVersion);
   const s=data.settings||{};
+  auditLog=Array.isArray(data.auditLog)?data.auditLog.filter(e=>e&&typeof e==='object'):[];
   if(typeof s.o1==='number')o1=s.o1;
   if(typeof s.o2==='number')o2=s.o2;
   if(typeof s.o3==='number')o3=s.o3;
@@ -466,9 +521,10 @@ function applyJson(data){
   if(document.getElementById('so3'))document.getElementById('so3').value=o3;
   if(document.getElementById('so4'))document.getElementById('so4').value=o4;
   rows = Array.isArray(data.rows) ? data.rows.map(r=>({s:["","","",""],d:["","","",""],...r})) : [];
-  rows.forEach(r=>{ delete r._touch; if(!Array.isArray(r.s))r.s=["","","",""]; if(!Array.isArray(r.d))r.d=["","","",""]; });
+  rows.forEach(r=>{ delete r._touch; if(!Array.isArray(r.s))r.s=["","","",""]; if(!Array.isArray(r.d))r.d=["","","",""]; ensureRowId(r); });
   rebuildLabels();
   recompute();
+  renderImportAudit();
 }
 
 async function loadFromHandle(handle){
@@ -558,9 +614,10 @@ function scheduleSave(){
   saveTimer=setTimeout(saveToFile,1500);
 }
 function setMemo(gi,val){ if(rows[gi]){ rows[gi].memo=val; markDirty(); } }
-function setNum(gi,key,val){ if(!rows[gi])return; const n=parseInt(String(val).replace(/[^0-9]/g,''))||0; if((rows[gi][key]||0)===n)return; rows[gi][key]=n; markDirty(); render(); }
-function setText(gi,key,val){ if(!rows[gi])return; const v=(val||'').trim(); if((rows[gi][key]||'')===v)return; rows[gi][key]=v; markDirty(); render(); }
-function setPlay(gi,val){ if(!rows[gi])return; const m=(val||'').match(/(\d{4})-(\d{1,2})-(\d{1,2})/); if(!m)return; const y=+m[1],mo=+m[2],dd=+m[3]; rows[gi].play=y+'/'+String(mo).padStart(2,'0')+'/'+String(dd).padStart(2,'0'); rows[gi].wd=WD[new Date(y,mo-1,dd).getDay()]; recompute(); markDirty(); render(); }   // プレー日変更→③④予定日も再計算
+const AUDIT_FIELD_LABEL={g:'組数',p:'人数',course:'コース',time:'スタート時間',tel:'連絡先電話番号',mob:'携帯電話番号',route:'経路'};
+function setNum(gi,key,val){ if(!rows[gi])return; const n=parseInt(String(val).replace(/[^0-9]/g,''))||0,prev=rows[gi][key]||0; if(prev===n)return; addAudit(rows[gi],AUDIT_FIELD_LABEL[key]||key,prev,n,'詳細画面'); rows[gi][key]=n; markDirty(); render(); }
+function setText(gi,key,val){ if(!rows[gi])return; const v=(val||'').trim(),prev=rows[gi][key]||''; if(prev===v)return; addAudit(rows[gi],AUDIT_FIELD_LABEL[key]||key,prev,v,'詳細画面'); rows[gi][key]=v; markDirty(); render(); }
+function setPlay(gi,val){ if(!rows[gi])return; const m=(val||'').match(/(\d{4})-(\d{1,2})-(\d{1,2})/); if(!m)return; const y=+m[1],mo=+m[2],dd=+m[3],prev=rows[gi].play||'',next=y+'/'+String(mo).padStart(2,'0')+'/'+String(dd).padStart(2,'0'); if(prev===next)return; addAudit(rows[gi],'プレー日',prev,next,'詳細画面'); rows[gi].play=next; rows[gi].wd=WD[new Date(y,mo-1,dd).getDay()]; recompute(); markDirty(); render(); }   // プレー日変更→③④予定日も再計算
 function routeSelect(gi,cur){ const opts=['AGWeb','電話','GORA','GDO','RECRUIT','VALUE','その他']; if(cur&&opts.indexOf(cur)<0)opts.unshift(cur); return '<select onchange="setText('+gi+",'route',this.value)\" class=\"numin\" style=\"width:auto;text-align:left\">"+opts.map(o=>'<option'+(o===cur?' selected':'')+'>'+esc(o)+'</option>').join('')+'</select>'; }
 function markDirty(immediate){
   if(suspendDirty)return;
@@ -984,7 +1041,9 @@ function visibleRows(){
 function setS(gi,i,val,quiet){
   const r=rows[gi];
   if(r.s[i]===val)return;
-  undoStack.push({gi,t:'s',i,prev:r.s[i]});
+  const before=r.s[i];
+  undoStack.push({gi,t:'s',i,prev:before,action:lbl[i]});
+  addAudit(r,lbl[i],before,val,'画面操作');
   r.s[i]=val; r._touch=true; selIdx=gi;
   document.getElementById('undoBtn').disabled=false;
   if(!quiet){
@@ -996,7 +1055,9 @@ function setS(gi,i,val,quiet){
 }
 function setF(gi,key,val,jp){
   const r=rows[gi]; if((r[key]||"")===val)return;
-  undoStack.push({gi,t:'f',key,prev:r[key]||""});
+  const before=r[key]||"";
+  undoStack.push({gi,t:'f',key,prev:before,action:jp});
+  addAudit(r,jp,before,val,'画面操作');
   r[key]=val; r._touch=true; selIdx=gi;
   document.getElementById('undoBtn').disabled=false;
   toast(jp+'＝'+(val===''?'未':val)+'（更新するまで一覧に残ります）');
@@ -1005,14 +1066,18 @@ function setF(gi,key,val,jp){
 function skipToEarly(gi){
   const r=rows[gi]; const prev=[r.s[0],r.s[1],r.s[2]];
   if(prev.every(v=>v==='不要')){toast('①〜③は既にスキップ済みです');return;}
-  undoStack.push({gi,t:'s3',prev});
+  undoStack.push({gi,t:'s3',prev,action:'④までスキップ'});
+  addAudit(r,'④までスキップ',prev,['不要','不要','不要'],'詳細画面');
   r.s[0]='不要';r.s[1]='不要';r.s[2]='不要'; r._touch=true; selIdx=gi;
   document.getElementById('undoBtn').disabled=false;
   toast('①〜③をスキップ（不要）。④だけ残します');
   advanceSel=true; markDirty(true); render();
 }
 function setNext(gi,v){
-  rows[gi].next = v?v.replace(/-/g,'/'):'';
+  const before=rows[gi].next||'',after=v?v.replace(/-/g,'/'):'';
+  if(before===after)return;
+  addAudit(rows[gi],'次回連絡日',before,after,'詳細画面');
+  rows[gi].next = after;
   rows[gi]._touch=true; markDirty(true);
   toast(v?('次回連絡日 '+rows[gi].next+'（その日まで今日やることから外します）'):'次回連絡日をクリア');
   advanceSel=true; render();
@@ -1020,7 +1085,9 @@ function setNext(gi,v){
 function undoLast(){
   if(undoStack.length===0){toast('戻す操作がありません');return;}
   const u=undoStack.pop();
-  if(u.t==='f'){rows[u.gi][u.key]=u.prev;} else if(u.t==='s3'){[0,1,2].forEach((i,k)=>rows[u.gi].s[i]=u.prev[k]);} else {rows[u.gi].s[u.i]=u.prev;}
+  const r=rows[u.gi]; let before,after;
+  if(u.t==='f'){before=r[u.key]||'';after=u.prev;r[u.key]=u.prev;} else if(u.t==='s3'){before=[r.s[0],r.s[1],r.s[2]];after=u.prev;[0,1,2].forEach((i,k)=>r.s[i]=u.prev[k]);} else {before=r.s[u.i];after=u.prev;r.s[u.i]=u.prev;}
+  addAudit(r,'元に戻す（'+(u.action||'状態変更')+'）',before,after,'元に戻す');
   rows[u.gi]._touch=true; selIdx=u.gi;
   document.getElementById('undoBtn').disabled=undoStack.length===0;
   toast('元に戻しました：'+rows[u.gi].n);
@@ -1030,7 +1097,7 @@ function refreshList(){ rows.forEach(r=>r._touch=false); undoStack=[]; document.
 function toggleMode(){showAll=!showAll;render();}
 function setMode(all){showAll=all;render();}
 function setSort(k){sortKey=k;document.getElementById('sortPlay').classList.toggle('on',k==='play');document.getElementById('sortRecv').classList.toggle('on',k==='recv');render();}
-function delRow(gi){const r=rows[gi];if(!r)return;if(confirm(r.n+' を削除しますか？\n（この操作は元に戻せません）')){rows.splice(gi,1);if(selIdx>=rows.length)selIdx=Math.max(0,rows.length-1);toast('削除しました：'+r.n);markDirty();render();}}
+function delRow(gi){const r=rows[gi];if(!r)return;if(confirm(r.n+' を削除しますか？\n（この操作は元に戻せません）')){addAudit(r,'予約削除','登録済み','削除','詳細画面');rows.splice(gi,1);if(selIdx>=rows.length)selIdx=Math.max(0,rows.length-1);toast('削除しました：'+r.n);markDirty();render();}}
 
 function render(){
   const vis=visibleRows();
@@ -1165,7 +1232,8 @@ function renderDetail(){
      <li>組数確定 ⇒ ◎</li>
      <li>M定例コンペ ⇒ 定例</li>
     </ol>
-   </aside>`;
+   </aside>
+   ${renderAuditHistory(r)}`;
 }
 function esc(s){return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
 function toast(m){const t=document.getElementById('toast');t.textContent=m;t.classList.add('show');clearTimeout(t._t);t._t=setTimeout(()=>t.classList.remove('show'),1900);}
@@ -1182,6 +1250,7 @@ function showScreen(name){
   document.getElementById('refBtn').classList.toggle('hidden',!main||showAll);
   document.getElementById('toMain').classList.toggle('hidden',main);
   if(name==='settings'){ const sb=document.getElementById('setUpdatedBy'); if(sb) sb.value=updatedBy||''; updateBackupStatus(); }
+  if(name==='import'){ renderImportAudit(); }
   if(name==='stats'){ renderStats(); }
 }
 function setImpMode(){
@@ -1195,6 +1264,8 @@ function setImpMode(){
   const xn=document.getElementById('xlsxName'); if(xn)xn.textContent='';
   const xf=document.getElementById('xlsxFile'); if(xf)xf.value='';
   const mm=document.getElementById('migMsg'); if(mm)mm.textContent='';
+  _importFileName='貼り付け';
+  renderImportAudit();
 }
 
 // ===== 既存Excel台帳の移行（SheetJS） =====
@@ -1297,6 +1368,7 @@ function dzDrop(e){
 function onCsvFile(input){ const f=input.files&&input.files[0]; if(f){readCsvFile(f); input.value='';} }
 function readCsvFile(f){
   if(!/\.(csv|txt)$/i.test(f.name)){ document.getElementById('impMsg').innerHTML='<span style="color:#b91c1c">CSV(.csv)またはテキスト(.txt)を選んでください</span>'; return; }
+  _importFileName=f.name||'CSVファイル';
   document.getElementById('dzFile').textContent='読み込み中… '+f.name;
   const reader=new FileReader();
   reader.onload=(e)=>{
@@ -1332,7 +1404,8 @@ function cleanName(s){ return cellClean(s).replace(/代表者名/g,'').trim(); }
 // CSV行を rows[] スキーマのオブジェクトへ。列順: 0場名1種別2プレー日3コース4時間5氏名6カナ7組数8人数9連絡先10携帯11FAX12経路13受付日時...
 function parseRow(c){
   const playDt=parseDate(c[2]);
-  const recvDt=parseDate(c[13]);
+  const recvAt=cellClean(c[13]);
+  const recvDt=parseDate(recvAt);
   const g=parseInt((c[7]||'').replace(/[^0-9]/g,''))||0;
   const p=parseInt((c[8]||'').replace(/[^0-9]/g,''))||0;
   const name=cleanName(c[5]);
@@ -1345,7 +1418,7 @@ function parseRow(c){
     time:tm.length?tm[1].padStart(2,'0')+':'+tm[2]:'',
     g,p,
     route:normRoute(c[12]),
-    recv:fmtSlash(recvDt),
+    recv:fmtSlash(recvDt), recvAt,
     d:["","","",""], s:["","","",""], kk:"",
     tel:cellClean(c[9]), mob:cellClean(c[10]),
     _playDt:playDt
@@ -1353,29 +1426,78 @@ function parseRow(c){
 }
 
 let _pendingImport=[];
+let _pendingImportBatchId='';
+let _importFileName='貼り付け';
+function rowStatusSummary(r){
+  const s=Array.isArray(r.s)?r.s:["","","",""];
+  const parts=[];
+  s.forEach((v,i)=>{if(v)parts.push(CIRC[i]+'='+v);});
+  if(r.kk)parts.push('組数確定='+r.kk);
+  if(r.kumi)parts.push('組合せ='+r.kumi);
+  return parts.length?parts.join(','):'未処理';
+}
+function importDifferences(ex,csv){
+  const fields=[
+    ['受付日時',ex.recvAt||ex.recv||'',csv.recvAt||csv.recv||''],
+    ['コース',ex.course||'',csv.course||''],['時間',ex.time||'',csv.time||''],
+    ['組数',ex.g||0,csv.g||0],['人数',ex.p||0,csv.p||0],
+    ['経路',ex.route||'',csv.route||''],['連絡先',ex.tel||'',csv.tel||''],['携帯',ex.mob||'',csv.mob||'']
+  ];
+  return fields.filter(([,a,b])=>String(a)!==String(b)).map(([name,a,b])=>name+': '+(a||'未')+' → '+(b||'未'));
+}
 function extract(){
   const t=document.getElementById('ta').value.trim();
   if(!t){document.getElementById('impMsg').textContent='CSVを貼り付けてください';return;}
   const lines=t.split(/\r?\n/).filter(l=>l.trim()&&l.indexOf('プレー日')<0);
   let total=0, ge3=0, future=0;
-  const cand=[];
+  const importId=makeAuditId('import'),cand=[],conditionExcluded=[];
   lines.forEach(l=>{
     total++;
     const c=l.split(',');
     const r=parseRow(c);
     if(r.g<3)return; ge3++;
-    if(!r._playDt||r._playDt<TODAY)return; future++;
-    if(!r.n)return;
+    if(!r._playDt){conditionExcluded.push({r,reason:'プレー日を読めない'});return;}
+    if(r._playDt<TODAY){conditionExcluded.push({r,reason:'プレー日が過去'});return;} future++;
+    if(!r.n){conditionExcluded.push({r,reason:'代表者名なし'});return;}
     cand.push(r);
   });
   // CSV内重複排除（プレー日+氏名+経路）
-  const seen=new Set(), uniq=[];
-  cand.forEach(r=>{ const k=r.play+'|'+r.n+'|'+r.route; if(!seen.has(k)){seen.add(k);uniq.push(r);} });
-  // 既存台帳と照合（プレー日+氏名が一致＝既存）→新規のみ
-  const fresh=uniq.filter(r=>!rows.some(ex=>ex.n===r.n && ex.play===r.play));
+  const seen=new Set(), uniq=[],csvDuplicates=[];
+  cand.forEach(r=>{ const k=r.play+'|'+r.n+'|'+r.route; if(!seen.has(k)){seen.add(k);uniq.push(r);}else{csvDuplicates.push(r);} });
+  // 既存台帳と照合（プレー日+氏名が一致＝既存）→新規のみ。既存判定も監査ログへ残す
+  const fresh=[], existingHits=[];
+  uniq.forEach(r=>{ const ex=rows.find(x=>x.n===r.n&&x.play===r.play); if(ex)existingHits.push({ex,csv:r}); else fresh.push(r); });
   const dupExisting=uniq.length-fresh.length;
-  fresh.forEach(r=>{ delete r._playDt; });
+  fresh.forEach(r=>{
+    delete r._playDt;
+    const event=addAudit(r,'CSV新規候補','未登録','登録待ち','CSV取込',
+      (_importFileName||'CSV')+'／受付:'+(r.recvAt||r.recv||'未'));
+    event.importId=importId;
+  });
   _pendingImport=fresh;
+  _pendingImportBatchId=importId;
+  const summary=addAudit(null,'CSV取込照合','読込'+total+'行','新規'+fresh.length+'件・既存'+existingHits.length+'件','CSV取込',
+    (_importFileName||'CSV')+'／3組以上'+ge3+'件・未来日'+future+'件・抽出'+uniq.length+'件・条件除外'+conditionExcluded.length+'件・CSV内重複'+csvDuplicates.length+'件');
+  summary.importId=importId;
+  existingHits.forEach(({ex,csv})=>{
+    const diffs=importDifferences(ex,csv);
+    const event=addAudit(ex,'CSV既存スキップ','受付:'+(ex.recvAt||ex.recv||'未')+'／状態:'+rowStatusSummary(ex),
+      'CSV受付:'+(csv.recvAt||csv.recv||'未')+'／既存状態を維持','CSV取込',
+      (_importFileName||'CSV')+'／'+(diffs.length?('差分 '+diffs.join('、')):'差分なし'));
+    event.importId=importId;
+  });
+  conditionExcluded.forEach(({r,reason})=>{
+    const event=addAudit(r,'CSV条件除外','CSVに存在','除外：'+reason,'CSV取込',
+      (_importFileName||'CSV')+'／組数:'+r.g+'／受付:'+(r.recvAt||r.recv||'未'));
+    event.importId=importId;
+  });
+  csvDuplicates.forEach(r=>{
+    const event=addAudit(r,'CSV内重複除外','CSVに存在','除外：同一プレー日・氏名・経路','CSV取込',
+      (_importFileName||'CSV')+'／組数:'+r.g+'／受付:'+(r.recvAt||r.recv||'未'));
+    event.importId=importId;
+  });
+  markDirty(true);
+  renderImportAudit();
   document.getElementById('impMsg').innerHTML=
     `抽出 <b>${uniq.length}</b> 件（3組以上・未来日・重複除外後）／ うち新規 <b>${fresh.length}</b> 件`
     +`<br><span style="color:#9ca3af;font-size:12px">読込${total}行 → 3組以上${ge3} → 未来日${future} → 重複/既存除外 ${uniq.length-fresh.length}件（既存台帳と重複 ${dupExisting}件）</span>`
@@ -1390,15 +1512,17 @@ function register(){
   }
   if(!_pendingImport.length){document.getElementById('impMsg').textContent='先にCSVを取り込んでください（ドロップ・ファイル選択・貼り付け）';return;}
   const n=_pendingImport.length;
-  _pendingImport.forEach(r=>rows.push(r));
+  _pendingImport.forEach(r=>{ ensureRowId(r); rows.push(r); const event=addAudit(r,'CSV新規登録','未登録','登録','CSV取込',(_importFileName||'CSV')+'／受付:'+(r.recvAt||r.recv||'未')); event.importId=_pendingImportBatchId; });
   recompute();             // ①〜④予定日を計算
   _pendingImport=[];
+  _pendingImportBatchId='';
   document.getElementById('ta').value='';
   document.getElementById('bReg').disabled=true;
   document.getElementById('impMsg').innerHTML=`<span style="color:#1a7f37;font-weight:700">${n} 件を台帳に登録しました（自動保存）。『一覧へ戻る』で確認できます</span>`;
-  markDirty();
+  markDirty(true);
   toast(n+' 件を登録しました');
   render();
+  renderImportAudit();
 }
 rebuildLabels(); recompute(); setImpMode('new'); render();
 </script>

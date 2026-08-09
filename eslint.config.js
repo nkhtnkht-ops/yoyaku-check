@@ -26,6 +26,8 @@ export default [
         vi: "readonly",
         // Browser globals used inside page.evaluate() callbacks
         window: "readonly",
+        document: "readonly",
+        localStorage: "readonly",
       },
     },
     rules: {
